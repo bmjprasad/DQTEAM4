@@ -1,0 +1,221 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC ## ML-based Anomaly Detection (Unsupervised, Rule-free)
+# MAGIC 
+# MAGIC Purpose:
+# MAGIC - Detect anomalies without predefined business rules by learning patterns from data.
+# MAGIC - Capture row-level outliers, column-level oddities, and cross-column relationship violations.
+# MAGIC 
+# MAGIC Inputs (via widgets):
+# MAGIC - `catalog`, `schema`, `table`
+# MAGIC - `idColumns`: Comma-separated primary key columns (optional)
+# MAGIC - `sampleFraction`: Sampling for training/scoring
+# MAGIC - `mode`: `all` | `row` | `column` | `relationship`
+# MAGIC 
+# MAGIC Outputs:
+# MAGIC - Delta table `<catalog>.dq.dq_anomalies` storing anomalies with scores and details
+
+# COMMAND ----------
+# Widgets and setup
+from pyspark.sql import functions as F
+from pyspark.sql import types as T
+import datetime
+
+try:
+  dbutils.widgets.text("catalog", "main")
+  dbutils.widgets.text("schema", "default")
+  dbutils.widgets.text("table", "")
+  dbutils.widgets.text("idColumns", "")
+  dbutils.widgets.text("sampleFraction", "0.3")
+  dbutils.widgets.dropdown("mode", "all", ["all", "row", "column", "relationship"])
+except NameError:
+  pass
+
+catalog = dbutils.widgets.get("catalog") if 'dbutils' in globals() else "main"
+schema = dbutils.widgets.get("schema") if 'dbutils' in globals() else "default"
+table = dbutils.widgets.get("table") if 'dbutils' in globals() else ""
+id_columns_str = dbutils.widgets.get("idColumns") if 'dbutils' in globals() else ""
+sample_fraction = float(dbutils.widgets.get("sampleFraction")) if 'dbutils' in globals() else 0.3
+mode = dbutils.widgets.get("mode") if 'dbutils' in globals() else "all"
+
+full_name = f"{catalog}.{schema}.{table}" if table else None
+assert full_name, "Please set the 'table' widget."
+
+df = spark.table(full_name)
+row_count = df.count()
+dfp = df.sample(False, sample_fraction, seed=7) if sample_fraction < 1.0 else df
+
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.dq")
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {catalog}.dq.dq_anomalies (
+  catalog_name STRING,
+  schema_name STRING,
+  table_name STRING,
+  anomaly_type STRING,           -- 'column' | 'row' | 'relationship'
+  columns ARRAY<STRING>,
+  row_id STRING,
+  anomaly_score DOUBLE,
+  details STRING,
+  created_at TIMESTAMP
+) USING DELTA
+PARTITIONED BY (table_name, anomaly_type)
+TBLPROPERTIES (delta.logRetentionDuration='interval 30 days', delta.minReaderVersion=2)
+""")
+
+cols = [f.name for f in df.schema.fields]
+if id_columns_str.strip():
+  id_cols = [c.strip() for c in id_columns_str.split(',') if c.strip() in cols]
+else:
+  id_cols = []
+
+if id_cols:
+  row_id_col = F.sha2(F.concat_ws("||", *[F.col(c).cast("string") for c in id_cols]), 256)
+else:
+  row_id_col = F.sha2(F.concat_ws("||", *[F.col(c).cast("string") for c in cols]), 256)
+
+dfp = dfp.withColumn("__row_id", row_id_col)
+created_at = datetime.datetime.utcnow()
+
+# COMMAND ----------
+# Column-level anomalies
+from pyspark.sql.types import NumericType, StringType
+
+column_anomalies = []
+
+# Numeric quantile tails
+num_cols = [f.name for f in df.schema.fields if isinstance(f.dataType, NumericType)]
+for c in num_cols:
+  try:
+    q01, q99 = dfp.approxQuantile(c, [0.01, 0.99], 0.01)
+    out = dfp.where((F.col(c) < F.lit(q01)) | (F.col(c) > F.lit(q99))) \
+             .select(F.lit(catalog).alias("catalog_name"),
+                     F.lit(schema).alias("schema_name"),
+                     F.lit(table).alias("table_name"),
+                     F.lit("column").alias("anomaly_type"),
+                     F.array(F.lit(c)).alias("columns"),
+                     F.col("__row_id").alias("row_id"),
+                     F.lit(1.0).alias("anomaly_score"),
+                     F.to_json(F.struct(F.lit("numeric_range").alias("reason"), F.lit(q01).alias("q01"), F.lit(q99).alias("q99"))).alias("details"),
+                     F.lit(created_at).alias("created_at"))
+    column_anomalies.append(out)
+  except Exception:
+    pass
+
+# String length tails and rare categories
+str_cols = [f.name for f in df.schema.fields if isinstance(f.dataType, StringType)]
+for c in str_cols:
+  try:
+    lq01, lq99 = dfp.select(F.length(F.col(c)).alias("_len")).approxQuantile("_len", [0.01, 0.99], 0.01)
+    out_len = dfp.where((F.length(F.col(c)) < F.lit(int(lq01))) | (F.length(F.col(c)) > F.lit(int(lq99)))) \
+                 .select(F.lit(catalog), F.lit(schema), F.lit(table), F.lit("column"), F.array(F.lit(c)), F.col("__row_id"), F.lit(1.0), F.to_json(F.struct(F.lit("string_length").alias("reason"), F.lit(int(lq01)).alias("len_q01"), F.lit(int(lq99)).alias("len_q99"))), F.lit(created_at))
+    column_anomalies.append(out_len)
+
+    freq = dfp.groupBy(c).count()
+    total = dfp.count()
+    rare = freq.withColumn("p", F.col("count") / F.lit(total)).where(F.col("p") < F.lit(0.005))
+    out_rare = dfp.join(rare.select(F.col(c).alias("_v"), F.col("p")), dfp[c] == F.col("_v"), "inner") \
+                 .select(F.lit(catalog), F.lit(schema), F.lit(table), F.lit("column"), F.array(F.lit(c)), F.col("__row_id"), (1.0 - F.col("p")).alias("anomaly_score"), F.to_json(F.struct(F.lit("rare_category").alias("reason"), F.col("p").alias("probability"))), F.lit(created_at))
+    column_anomalies.append(out_rare)
+  except Exception:
+    pass
+
+col_anom_df = None
+if column_anomalies:
+  col_anom_df = column_anomalies[0]
+  for d in column_anomalies[1:]:
+    col_anom_df = col_anom_df.unionByName(d, allowMissingColumns=True)
+
+if mode in ("all", "column") and col_anom_df is not None:
+  col_anom_df.write.mode("append").format("delta").saveAsTable(f"{catalog}.dq.dq_anomalies")
+  print(f"Column anomalies written: {col_anom_df.count()}")
+
+# COMMAND ----------
+# Row-level anomalies
+# Sum of per-column anomaly flags, flag top ~1%
+from pyspark.sql.types import NumericType, StringType
+
+dsig = dfp.select("__row_id")
+
+for c in num_cols:
+  try:
+    q01, q99 = dfp.approxQuantile(c, [0.01, 0.99], 0.01)
+    dsig = dsig.join(dfp.select("__row_id", (F.when((F.col(c) < q01) | (F.col(c) > q99), 1.0).otherwise(0.0)).alias(f"sig_{c}")), "__row_id")
+  except Exception:
+    pass
+
+for c in str_cols:
+  try:
+    lq01, lq99 = dfp.select(F.length(F.col(c)).alias("_len")).approxQuantile("_len", [0.01, 0.99], 0.01)
+    dsig = dsig.join(dfp.select("__row_id", (F.when((F.length(F.col(c)) < int(lq01)) | (F.length(F.col(c)) > int(lq99)), 1.0).otherwise(0.0)).alias(f"sig_{c}")), "__row_id")
+  except Exception:
+    pass
+
+sig_cols = [c for c in dsig.columns if c != "__row_id"]
+if sig_cols:
+  dsig = dsig.withColumn("row_score", sum([F.col(c) for c in sig_cols]))
+  q99 = dsig.approxQuantile("row_score", [0.99], 0.01)[0]
+  row_anom = dsig.where(F.col("row_score") >= F.lit(q99)) \
+               .select(F.lit(catalog), F.lit(schema), F.lit(table), F.lit("row"), F.array().cast("array<string>"), F.col("__row_id"), F.col("row_score"), F.to_json(F.struct(F.lit("row_score_q99").alias("reason"), F.lit(float(q99)).alias("threshold"))), F.lit(created_at))
+  if mode in ("all", "row"):
+    row_anom.write.mode("append").format("delta").saveAsTable(f"{catalog}.dq.dq_anomalies")
+    print(f"Row anomalies written: {row_anom.count()}")
+
+# COMMAND ----------
+# Relationship-level anomalies
+from pyspark.sql.types import NumericType, StringType
+
+rel_anomalies = []
+
+# Numeric pairwise residuals for correlated columns
+num_cols = [f.name for f in df.schema.fields if isinstance(f.dataType, NumericType)]
+for i in range(len(num_cols)):
+  for j in range(i+1, len(num_cols)):
+    x, y = num_cols[i], num_cols[j]
+    try:
+      corr = dfp.stat.corr(x, y)
+      if corr is None or abs(corr) < 0.7:
+        continue
+      stats = dfp.select(F.avg(F.col(x)).alias("mx"), F.avg(F.col(y)).alias("my"), F.variance(F.col(x)).alias("vx"), F.covar_samp(F.col(x), F.col(y)).alias("cxy")).first()
+      if not stats or stats.vx in (None, 0):
+        continue
+      b = stats.cxy / stats.vx
+      a = stats.my - b * stats.mx
+      resid = dfp.select("__row_id", (F.col(y) - (F.lit(a) + F.lit(b) * F.col(x))).alias("res"))
+      q99 = resid.approxQuantile("res", [0.99], 0.01)[0]
+      q01 = resid.approxQuantile("res", [0.01], 0.01)[0]
+      out = resid.where((F.col("res") > F.lit(q99)) | (F.col("res") < F.lit(q01))) \
+               .select(F.lit(catalog), F.lit(schema), F.lit(table), F.lit("relationship"), F.array(F.lit(x), F.lit(y)), F.col("__row_id"), F.abs(F.col("res")).alias("anomaly_score"), F.to_json(F.struct(F.lit("linear_residual").alias("reason"), F.lit(float(a)).alias("intercept"), F.lit(float(b)).alias("slope"), F.lit(float(q01)).alias("q01"), F.lit(float(q99)).alias("q99"))), F.lit(created_at))
+      rel_anomalies.append(out)
+    except Exception:
+      pass
+
+# Rare categorical pairs
+cat_cols = [f.name for f in df.schema.fields if isinstance(f.dataType, StringType)]
+for i in range(len(cat_cols)):
+  for j in range(i+1, len(cat_cols)):
+    a, b = cat_cols[i], cat_cols[j]
+    try:
+      comb = dfp.groupBy(a, b).count()
+      total = dfp.count()
+      comb = comb.withColumn("p", F.col("count") / F.lit(total))
+      rare_comb = comb.where(F.col("p") < F.lit(0.002)).select(a, b)
+      out = dfp.join(rare_comb, on=[a, b], how="inner") \
+               .select(F.lit(catalog), F.lit(schema), F.lit(table), F.lit("relationship"), F.array(F.lit(a), F.lit(b)), F.col("__row_id"), F.lit(1.0).alias("anomaly_score"), F.to_json(F.struct(F.lit("rare_combination").alias("reason"))), F.lit(created_at))
+      rel_anomalies.append(out)
+    except Exception:
+      pass
+
+if rel_anomalies and mode in ("all", "relationship"):
+  rel_df = rel_anomalies[0]
+  for d in rel_anomalies[1:]:
+    rel_df = rel_df.unionByName(d, allowMissingColumns=True)
+  rel_df.write.mode("append").format("delta").saveAsTable(f"{catalog}.dq.dq_anomalies")
+  print(f"Relationship anomalies written: {rel_df.count()}")
+
+# COMMAND ----------
+# Overview
+anom_df = spark.table(f"{catalog}.dq.dq_anomalies").where((F.col("catalog_name") == catalog) & (F.col("schema_name") == schema) & (F.col("table_name") == table))
+print("Anomaly counts by type:")
+display(anom_df.groupBy("anomaly_type").count())
+
+display(anom_df.orderBy(F.desc("anomaly_score")).limit(50))
