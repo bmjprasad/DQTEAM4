@@ -1,0 +1,72 @@
+{
+  "customer_data_rules": {
+    "not_null_constraints": {
+      "type": "not_null",
+      "columns": ["customer_id", "first_name", "last_name", "email"]
+    },
+    "email_format_validation": {
+      "type": "pattern",
+      "column": "email",
+      "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+    },
+    "phone_format_validation": {
+      "type": "pattern",
+      "column": "phone",
+      "pattern": "^\\+?[1-9]\\d{1,14}$"
+    },
+    "age_range_validation": {
+      "type": "range",
+      "column": "age",
+      "min_value": 0,
+      "max_value": 120
+    },
+    "unique_customer_id": {
+      "type": "unique",
+      "columns": ["customer_id"]
+    }
+  },
+  "sales_data_rules": {
+    "not_null_constraints": {
+      "type": "not_null",
+      "columns": ["sale_id", "customer_id", "product_id", "sale_date", "amount"]
+    },
+    "amount_range_validation": {
+      "type": "range",
+      "column": "amount",
+      "min_value": 0.01,
+      "max_value": 1000000
+    },
+    "sale_date_validation": {
+      "type": "range",
+      "column": "sale_date",
+      "min_value": "2020-01-01",
+      "max_value": "2024-12-31"
+    },
+    "unique_sale_id": {
+      "type": "unique",
+      "columns": ["sale_id"]
+    }
+  },
+  "product_data_rules": {
+    "not_null_constraints": {
+      "type": "not_null",
+      "columns": ["product_id", "product_name", "category", "price"]
+    },
+    "price_range_validation": {
+      "type": "range",
+      "column": "price",
+      "min_value": 0.01,
+      "max_value": 10000
+    },
+    "product_name_length": {
+      "type": "length",
+      "column": "product_name",
+      "min_length": 3,
+      "max_length": 100
+    },
+    "unique_product_id": {
+      "type": "unique",
+      "columns": ["product_id"]
+    }
+  }
+}
