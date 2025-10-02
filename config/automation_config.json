@@ -1,0 +1,153 @@
+{
+  "quality_checks": [
+    {
+      "name": "customer_data_quality",
+      "dataset": "customers",
+      "rules_config": {
+        "not_null_constraints": {
+          "type": "not_null",
+          "columns": ["customer_id", "first_name", "last_name", "email"]
+        },
+        "email_format_validation": {
+          "type": "pattern",
+          "column": "email",
+          "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+        },
+        "phone_format_validation": {
+          "type": "pattern",
+          "column": "phone",
+          "pattern": "^\\+?[1-9]\\d{1,14}$"
+        },
+        "age_range_validation": {
+          "type": "range",
+          "column": "age",
+          "min_value": 0,
+          "max_value": 120
+        },
+        "unique_customer_id": {
+          "type": "unique",
+          "columns": ["customer_id"]
+        }
+      },
+      "schedule": "daily",
+      "schedule_time": "09:00",
+      "enabled": true,
+      "alert_threshold": 85.0
+    },
+    {
+      "name": "sales_data_quality",
+      "dataset": "sales",
+      "rules_config": {
+        "not_null_constraints": {
+          "type": "not_null",
+          "columns": ["sale_id", "customer_id", "product_id", "sale_date", "amount"]
+        },
+        "amount_range_validation": {
+          "type": "range",
+          "column": "amount",
+          "min_value": 0.01,
+          "max_value": 1000000
+        },
+        "sale_date_validation": {
+          "type": "range",
+          "column": "sale_date",
+          "min_value": "2020-01-01",
+          "max_value": "2024-12-31"
+        },
+        "unique_sale_id": {
+          "type": "unique",
+          "columns": ["sale_id"]
+        },
+        "currency_format_validation": {
+          "type": "pattern",
+          "column": "currency",
+          "pattern": "^[A-Z]{3}$"
+        }
+      },
+      "schedule": "daily",
+      "schedule_time": "10:00",
+      "enabled": true,
+      "alert_threshold": 90.0
+    },
+    {
+      "name": "product_data_quality",
+      "dataset": "products",
+      "rules_config": {
+        "not_null_constraints": {
+          "type": "not_null",
+          "columns": ["product_id", "product_name", "category", "price"]
+        },
+        "price_range_validation": {
+          "type": "range",
+          "column": "price",
+          "min_value": 0.01,
+          "max_value": 10000
+        },
+        "product_name_length": {
+          "type": "length",
+          "column": "product_name",
+          "min_length": 3,
+          "max_length": 100
+        },
+        "unique_product_id": {
+          "type": "unique",
+          "columns": ["product_id"]
+        }
+      },
+      "schedule": "weekly",
+      "schedule_time": "08:00",
+      "enabled": true,
+      "alert_threshold": 80.0
+    }
+  ],
+  "alert_rules": [
+    {
+      "name": "critical_quality_alerts",
+      "condition": "quality_score < 70",
+      "severity": "critical",
+      "channels": ["email", "slack", "webhook"],
+      "enabled": true,
+      "cooldown_minutes": 15
+    },
+    {
+      "name": "high_quality_alerts",
+      "condition": "quality_score < 80",
+      "severity": "high",
+      "channels": ["email", "slack"],
+      "enabled": true,
+      "cooldown_minutes": 30
+    },
+    {
+      "name": "medium_quality_alerts",
+      "condition": "quality_score < 90",
+      "severity": "medium",
+      "channels": ["email", "log"],
+      "enabled": true,
+      "cooldown_minutes": 60
+    },
+    {
+      "name": "low_quality_alerts",
+      "condition": "quality_score < 95",
+      "severity": "low",
+      "channels": ["log"],
+      "enabled": true,
+      "cooldown_minutes": 120
+    }
+  ],
+  "channels_config": {
+    "email": {
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 587,
+      "username": "your-email@gmail.com",
+      "password": "your-app-password",
+      "from_email": "data-quality@yourcompany.com",
+      "to_emails": ["admin@yourcompany.com", "data-team@yourcompany.com"]
+    },
+    "slack": {
+      "webhook_url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+    },
+    "webhook": {
+      "url": "https://your-monitoring-system.com/webhook/data-quality"
+    }
+  }
+}

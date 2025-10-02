@@ -1,0 +1,67 @@
+{
+  "customer_data_cleansing": {
+    "null_handling": {
+      "email": {
+        "strategy": "fill",
+        "method": "constant",
+        "value": "unknown@example.com"
+      },
+      "phone": {
+        "strategy": "drop"
+      }
+    },
+    "type_corrections": {
+      "age": "integer",
+      "customer_id": "string"
+    },
+    "standardization": {
+      "first_name": {
+        "case_standardization": "title"
+      },
+      "last_name": {
+        "case_standardization": "title"
+      },
+      "email": {
+        "case_standardization": "lower"
+      }
+    }
+  },
+  "sales_data_cleansing": {
+    "null_handling": {
+      "amount": {
+        "strategy": "fill",
+        "method": "mean"
+      }
+    },
+    "type_corrections": {
+      "amount": "double",
+      "sale_id": "string"
+    },
+    "standardization": {
+      "sale_date": {
+        "date_format": "yyyy-MM-dd"
+      }
+    }
+  },
+  "product_data_cleansing": {
+    "null_handling": {
+      "description": {
+        "strategy": "fill",
+        "method": "constant",
+        "value": "No description available"
+      }
+    },
+    "type_corrections": {
+      "price": "double",
+      "product_id": "string"
+    },
+    "standardization": {
+      "product_name": {
+        "case_standardization": "title"
+      },
+      "category": {
+        "case_standardization": "upper"
+      }
+    }
+  }
+}
